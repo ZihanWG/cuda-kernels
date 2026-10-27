@@ -20,6 +20,7 @@ add_library(gemm_kernels STATIC
   src/gemm/gemm_02_smem_tiling.cu
   src/gemm/gemm_03_1_blocktiling.cu
   src/gemm/gemm_04_2d_blocktiling.cu
+  src/gemm/gemm_05_vectorized.cu
 )
 target_include_directories(gemm_kernels PUBLIC src)
 target_link_libraries(gemm_kernels PUBLIC CUDA::cudart CUDA::cublas)
