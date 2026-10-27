@@ -2,6 +2,17 @@
 #include "gemm/gemm.h"
 #include <cstdio>
 
+//04 让每个线程负责一个 8×8 的方块，A 和 B 的值都能复用 8 次：
+
+//版本	每线程输出数     每轮 dot 读 smem	每轮 dot 做 FMA	   smem 读取 / FMA
+//02	1	            2	              1	                2.0
+//03	8（1 列）	    1 + 8 = 9	      8       	        约 1.1
+//04	64（8×8）	    8 + 8 = 16	        64	            0.25
+
+//厨房比喻： 每个厨师负责菜单上一个 8×8 的区域。每一步，左手拿 8 样 A 食材，右手拿 8 样 B 食材，两两组合做出 64 道菜。拿 16 次，做 64 次。
+
+//数学上，这就是外积（outer product）： 一个 8 维列向量乘一个 8 维行向量，得到 8×8 的矩阵。
+//
 template <int BM, int BN, int BK, int TM>
 __global__ void gemm_1d_blocktiling_kernel(const float *__restrict__ A,
                                            const float *__restrict__ B,
@@ -25,10 +36,10 @@ __global__ void gemm_1d_blocktiling_kernel(const float *__restrict__ A,
 
     for (int bk = 0; bk < K; bk += BK)
     {
-        // TODO 1: As[innerRowA][innerColA] = A[ 全局行 ][ 全局列 ]
+    
         //         全局行 = cRow*BM + innerRowA，全局列 = bk + innerColA
         As[innerRowA][innerColA] = A[(cRow * BM + innerRowA) * K + (bk + innerColA)];
-        // TODO 2: Bs[innerRowB][innerColB] = B[ 全局行 ][ 全局列 ]
+        
         //         全局行 = bk + innerRowB，全局列 = cCol * BN + innerColB
         Bs[innerRowB][innerColB] = B[(bk + innerRowB) * N + (cCol * BN + innerColB)];
 
@@ -36,19 +47,19 @@ __global__ void gemm_1d_blocktiling_kernel(const float *__restrict__ A,
 
         for (int dot = 0; dot < BK; ++dot)
         {
-            // TODO 3: 把 Bs 的一个值读进寄存器 b
+            
             float b = Bs[dot][threadCol];
 
             for (int i = 0; i < TM; ++i)
             {
-                // TODO 4: acc[i] += ...
+                
                 acc[i] += As[threadRow * TM + i][dot] * b;
             }
         }
         __syncthreads();
     }
 
-    // TODO 5: 把 8 个结果写回 C
+  
     //         第 i 个结果的全局行 = cRow*BM + threadRow*TM + i，全局列 = ?
     for (int i = 0; i < TM; ++i)
     {
