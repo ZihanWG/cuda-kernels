@@ -3,3 +3,4 @@ build/
 *.nsys-rep
 build/
 *.deb
+.git.bak/

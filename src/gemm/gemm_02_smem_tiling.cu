@@ -55,10 +55,9 @@ __global__ void gemm_smem_tiling_kernel(const float *__restrict__ A,
   }
 }
 
-void gemm_02_smem_tiling(const float *A, const float *B, float *C,
-                         int M, int N, int K)
-{
+void gemm_02_smem_tiling(const float* A, const float* B, float* C,
+                         int M, int N, int K, cudaStream_t stream) {
   dim3 blockDim(TILE, TILE);
   dim3 gridDim((N + TILE - 1) / TILE, (M + TILE - 1) / TILE);
-  gemm_smem_tiling_kernel<<<gridDim, blockDim>>>(A, B, C, M, N, K);
+  gemm_smem_tiling_kernel<<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
 }

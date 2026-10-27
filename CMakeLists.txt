@@ -17,6 +17,7 @@ add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 add_library(gemm_kernels STATIC
   src/gemm/cublas_ref.cu
   src/gemm/gemm_01_naive.cu
+  src/gemm/gemm_02_smem_tiling.cu
 )
 target_include_directories(gemm_kernels PUBLIC src)
 target_link_libraries(gemm_kernels PUBLIC CUDA::cudart CUDA::cublas)
