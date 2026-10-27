@@ -20,12 +20,14 @@ Hand-written SGEMM kernels optimized step by step, each version compared against
 
 ## Results
 
-| Size | cuBLAS | 01 naive | 02 T=16 | 02 T=32 | 03 1D blocktile | 03 vs 02 T=16 |
-|---|---|---|---|---|---|---|
-| 512 | 5.7 TFLOPS | 1088 GFLOPS (19.0%) | 1507 GFLOPS (26.4%) | 1380 GFLOPS (24.2%) | 2474 GFLOPS (43.3%) | 1.64× |
-| 1024 | 10.5 TFLOPS | 1211 GFLOPS (11.5%) | 1628 GFLOPS (15.5%) | 1495 GFLOPS (14.2%) | 4104 GFLOPS (39.0%) | 2.52× |
-| 2048 | 13.8 TFLOPS | 1318 GFLOPS (9.5%) | 1891 GFLOPS (13.7%) | 1693 GFLOPS (12.2%) | 5271 GFLOPS (38.1%) | 2.79× |
-| 4096 | 15.4 TFLOPS | 1231 GFLOPS (8.0%) | 1787 GFLOPS (11.6%) | 1685 GFLOPS (10.9%) | 5316 GFLOPS (34.5%) | 2.97× |
+| Size | cuBLAS | 01 naive | 02 T=16 | 02 T=32 | 03 1D | 04 2D | 04 vs 03 |
+|---|---|---|---|---|---|---|---|
+| 512 | 5.7 TFLOPS | 1088 (19.1%) | 1520 (26.6%) | 1394 (24.4%) | 2521 (44.2%) | 2065 (36.2%) | 0.82× |
+| 1024 | 9.3 TFLOPS | 1206 (13.0%) | 1636 (17.6%) | 1502 (16.1%) | 4186 (45.0%) | 5001 (53.7%) | 1.19× |
+| 2048 | 11.6 TFLOPS | 1398 (12.0%) | 2013 (17.3%) | 1869 (16.0%) | 5844 (50.2%) | 9659 (82.9%) | 1.65× |
+| 4096 | 15.7 TFLOPS | 1333 (8.5%) | 1963 (12.5%) | 1786 (11.4%) | 5301 (33.8%) | 10807 (68.9%) | 2.04× |
+
+Kernel columns are GFLOPS with % of cuBLAS in brackets. In this run the cuBLAS baseline at 1024 and 2048 was lower than in neighbouring runs (e.g. 9.3 vs 10.5–10.8 TFLOPS at 1024), which inflates those two percentages; the 4096 baseline is normal.
 
 All numbers are from one interleaved run. The laptop GPU throttles over consecutive runs: in repeated 4096 runs taken while throttled, the T=32 / T=16 time ratio ranged from 0.96× to 1.37×, so close wall-clock comparisons at 4096 (02 T=16 vs T=32) are not reliable; the cycle counts from Nsight Compute are the evidence used for conclusions.
 
@@ -55,6 +57,14 @@ Each block of 512 threads computes a 64×64 tile of C; each thread computes a co
 - **Loading**: `As` (64×8) and `Bs` (8×64) each hold 512 elements, exactly one per thread, so the cooperative load needs no loop.
 - **Bank conflicts**: `Bs[dot][threadCol]` is 32 consecutive floats per warp; `As[threadRow*TM+i][dot]` is a broadcast (all 32 lanes of a warp share `threadRow`); `As` stores map address = `tid`. All conflict-free for loads.
 - **Size requirement**: M, N must be multiples of 64 and K of 8. This is checked at runtime (not `assert`, which Release builds compile out); on violation the wrapper prints an error to stderr and skips the launch, so the benchmark's NaN pre-fill makes the check FAIL instead of silently computing garbage.
+
+### 04 — 2D register blocktiling (BM = BN = 128, BK = 8, TM = TN = 8)
+
+Each block of 256 threads computes a 128×128 tile of C; each thread owns an 8×8 sub-block (64 accumulators in registers). Per K-step (`dot`) a thread loads 8 values of `As` into `regM` and 8 values of `Bs` into `regN`, then does the 8×8 outer product: 16 shared-memory reads feed 64 FMAs (0.25 smem reads per FMA, vs ≈1.1 in 03 and 2 in 02).
+
+- **Loading**: 256 threads cover the 128×8 `As` tile in 4 strided passes (`strideA = 256/BK = 32`) and the 8×128 `Bs` tile in 4 passes (`strideB = 256/BN = 2`).
+- **Size requirement**: M, N multiples of 128 and K a multiple of 8, checked at runtime (prints to stderr and skips the launch, so the benchmark's NaN pre-fill makes it FAIL rather than silently wrong).
+- **Resources**: 128 registers/thread, 0 bytes spilled, 8 KB static shared memory per block.
 
 ## Profiling: why only 1.4×?
 
@@ -156,14 +166,59 @@ Stall breakdown (cycles per issued instruction, share of total in brackets):
 
 **Takeaway**: 1D blocktiling reached 34–43% of cuBLAS. The remaining levers are more FMAs per smem load (2D register tiling, each thread a TM×TN block, loading `As` fragments into registers too), hiding global-load latency (double buffering), and wider/better-coalesced loads (`float4`; the 8-float-wide `As` row read is only 32 B per row).
 
+## Profiling: 03 → 04
+
+Nsight Compute, 4096³, one pass each:
+
+| Metric | 03 1D | 04 2D |
+|---|---|---|
+| Elapsed cycles | 39.7 M | 19.3 M (2.06× fewer) |
+| Issue slots busy / IPC (active) | 37.2% / 1.51 | 55.3% / 2.31 |
+| FMA pipe utilization | 24.1% | 49.0% |
+| Achieved / theoretical occupancy | 66.2% / 66.7% | 32.6% / 33.3% |
+| Registers per thread | 47 | 128 |
+| Active / eligible warps per scheduler | 7.94 / 1.21 | 3.91 / 1.67 |
+| Warp cycles per issued instruction | 21.0 | 6.8 |
+| Local memory load/store bytes | 0 / 0 | 0 / 0 |
+| Smem load instructions | 805 M | 134 M |
+| Smem load wavefronts | 1342 M | 671 M |
+| Smem load bank conflicts | 79 K | 268 M (40% of wavefronts) |
+| Smem store bank conflicts | 6.0 M | 0 |
+| L1/TEX throughput / Mem pipes busy | 83.0% / 81.7% | 72.8% / 35.4% |
+| DRAM bytes read / DRAM throughput | 4.46 GB / 31.5% | 1.45 GB / 21.4% |
+| L2 throughput | 23.4% | 26.4% |
+
+Stall breakdown (cycles per issued instruction, share of total in brackets):
+
+| Stall reason | 03 (total 21.0) | 04 (total 6.8) |
+|---|---|---|
+| MIO throttle | 6.8 (33%) | 0.9 (13%) |
+| Long scoreboard | 5.2 (25%) | 0.7 (10%) |
+| Barrier | 2.0 (10%) | 0.8 (11%) |
+| Short scoreboard | 2.0 (10%) | 0.2 (3%) |
+| Not selected | 2.2 (10%) | 1.9 (28%) |
+| Dispatch | 0.6 (3%) | 0.8 (12%) |
+| Selected (issuing) | 1.0 (5%) | 1.0 (15%) |
+
+### Findings
+
+1. **Occupancy halved (66% → 33%) yet IPC rose 1.5× and cycles halved.** Occupancy is a means, not the goal. With 128 registers only 2 blocks (16 warps) fit per SM, but each warp now has 64 independent FMAs per 16 shared-memory reads, so a warp rarely waits: stall time per issued instruction fell from 21 to 6.8 cycles and 1.67 of ~3.9 warps per scheduler are eligible on average. The extra thread-level parallelism that 03 needed to hide latency is replaced by instruction-level parallelism inside each thread. (This reading fits the stall data; I did not run an experiment that isolates it, e.g. forcing lower register use.)
+2. **No register spilling despite 128 registers.** `ptxas -v` reports 0 bytes of stack frame and spill; ncu shows 0 local-memory load/store bytes and 0 spilling requests. The 64 accumulators + 16 operand registers stay in registers because all loops have compile-time bounds and unroll fully. Note the outer-product loops carry no explicit `#pragma unroll`; they rely on the compiler, which is worth re-checking if TM/TN change.
+3. **The compiler generated `LDS.128` on its own.** The SASS has 32 `LDS.128` and no scalar `LDS`: with the `dot` loop unrolled, each thread's 8 values of a row of `As` and of `Bs` are contiguous, so they merge into 128-bit loads. Shared-memory load instructions fell 6× (805 M → 134 M) and wavefronts 2×, which is why MIO throttle stalls dropped from 33% to 13% of the total.
+4. **Bank conflicts appeared and are now the main waste on the shared-memory side.** 268 M of 671 M load wavefronts (40%) are conflict replays, while stores are conflict-free. My pre-run estimate of 2-way (`As`) and 4-way (`Bs`) conflicts assumed scalar loads; with `LDS.128` the conflict rules differ and this data cannot split the conflicts between `As` and `Bs`. The shared-memory pipes are only 35% busy, so conflicts are not the bottleneck at the moment.
+5. **At 512 the grid is too small for 04.** 128×128 blocks give only 16 blocks for 58 SMs (03's 64×64 blocks give 64), so most SMs idle and 04 is 0.82× of 03 there. 04 pays off from 1024 up and reaches 1.65–2.04× at 2048–4096.
+
+**Takeaway**: 04 reaches 69% of cuBLAS at 4096 (83% at 2048). About 85% of issued instructions are FFMA (estimated from IPC × cycles), the FMA pipe is at 49%, and issue slots at 55%. Remaining candidates, none yet measured: removing the 40% bank-conflict overhead (e.g. transposed `As`), hiding global-load latency with double buffering (long scoreboard + barrier still ≈ 21% of stalls), `float4` global loads, and tuning register use to raise occupancy.
+
 ## Roadmap
 
 - [x] 01 naive baseline + benchmark harness
 - [x] 02 shared memory tiling + Nsight Compute analysis
 - [x] TILE=32 experiment: higher reuse vs lower occupancy (T=16 wins; see above)
 - [x] 03 1D register blocktiling (BM=BN=64, BK=8, TM=8) + Nsight Compute comparison
-- [ ] 03_2 2D register tiling (each thread computes a TM×TN block of C)
-- [ ] 04 vectorized loads (float4), 05 double buffering
+- [x] 04 2D register blocktiling (BM=BN=128, BK=8, TM=TN=8) + Nsight Compute comparison (69% of cuBLAS at 4096)
+- [ ] 05 fix the `As` bank conflicts (transposed `As`) and use `float4` global loads
+- [ ] 06 double buffering; revisit register count / occupancy trade-off
 - [ ] Phase 2: FlashAttention-style fused attention (CUDA + Triton), vs PyTorch SDPA / FlashAttention-2
 - [ ] Phase 3: inference systems with vLLM (PagedAttention, KV cache, batching, quantization)
 
