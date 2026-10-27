@@ -76,7 +76,9 @@ Nsight Compute, 4096³:
 
 ## Experiment: TILE = 32
 
-**Prediction.** A bigger tile should help on the memory side: global/L2 traffic per FMA halves, so L2 and DRAM pressure drops. The cost is occupancy: a 1024-thread block fits once per SM (1536-thread limit), so only 66.7% of the warp slots are used, and with a single resident block all warps wait at the same `__syncthreads()`. The roadmap framed it as "higher reuse vs lower occupancy"; my specific guess was that barrier stalls would be what makes T=32 lose.
+**Prediction.** My prediction: slower — occupancy drops from ~100% to 66.7%, fewer warps to hide latency.
+
+Alternative hypothesis: barrier stalls with only one block per SM — refuted by WarpStateStats (barrier share dropped from 15% to 7%).
 
 **Nsight Compute, 4096³** (one pass each):
 
@@ -103,7 +105,7 @@ Warp stall breakdown (cycles per issued instruction; total 38.5 for T=16, 34.9 f
 
 **Result.** T=32 does what the prediction said on the memory side: DRAM reads halve, L2 throughput halves, LSU load drops from 98% to 82%. It is still ~8% slower in cycles, and benchmarks show T=16 ahead by 8–12% up to 2048 (4096 is noisy, see above).
 
-**The barrier guess was wrong.** Barrier stalls are *smaller* with T=32 (7% vs 15% of stall cycles); a larger block spends fewer barrier rounds per useful FMA. The loss comes from latency hiding instead: with 8 instead of 12 warps per scheduler there are fewer eligible warps (1.06 vs 1.32), IPC falls from 1.24 to 0.89, and MIO throttle (the shared-memory instruction queue) becomes an even larger share of each warp's wait.
+**The barrier hypothesis was refuted.** Barrier stalls are *smaller* with T=32 (7% vs 15% of stall cycles); a larger block spends fewer barrier rounds per useful FMA. The loss comes from latency hiding, as predicted: with 8 instead of 12 warps per scheduler there are fewer eligible warps (1.06 vs 1.32), IPC falls from 1.24 to 0.89, and MIO throttle (the shared-memory instruction queue) becomes an even larger share of each warp's wait.
 
 **Conclusion.** Tile size alone does not break the bottleneck. Smem load wavefronts are identical (3.22 G) because each thread still produces one output, so the shared-memory instruction count per FMA does not change; T=32 only trades less global traffic for less occupancy. T=16 stays the default for 02. The remaining headroom is in raising FMAs per shared-memory load (register tiling, next).
 
