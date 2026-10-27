@@ -20,7 +20,8 @@ struct Kernel { const char* name; GemmFn fn; };
 static const Kernel kKernels[] = {
     {"cublas", gemm_cublas},
     {"01_naive", gemm_01_naive},
-    {"02_smem_tiling", gemm_02_smem_tiling},
+    {"02_smem_t16", gemm_02_smem_tiling_t16},
+    {"02_smem_t32", gemm_02_smem_tiling_t32},
 };
 
 static std::vector<std::string> split(const std::string& s) {

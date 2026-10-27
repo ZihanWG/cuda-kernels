@@ -1,13 +1,11 @@
 #include "common/cuda_utils.cuh"
 #include "gemm/gemm.h"
 
-// [补] TILE 原来没有定义。先固定为 16，之后做 16/32 对比时再改成模板
-constexpr int TILE = 16;
-
 // Example: M=N=K=4, TILE=2. C is cut into 2x2 tiles, one block per tile.
 // blockIdx = (x=1, y=0) -> block computes C rows 0-1, cols 2-3 (upper-right tile).
 // threadIdx = (x=0, y=1) -> thread computes C[1][2] (row = 0*2+1, col = 1*2+0).
 // Needs A rows 0-1 (all K) and B cols 2-3 (all K), split into K/TILE rounds.
+template <int TILE>
 __global__ void gemm_smem_tiling_kernel(const float *__restrict__ A,
                                         const float *__restrict__ B,
                                         float *__restrict__ C,
@@ -55,9 +53,20 @@ __global__ void gemm_smem_tiling_kernel(const float *__restrict__ A,
   }
 }
 
-void gemm_02_smem_tiling(const float* A, const float* B, float* C,
-                         int M, int N, int K, cudaStream_t stream) {
+template <int TILE>
+static void launch(const float* A, const float* B, float* C,
+                   int M, int N, int K, cudaStream_t stream) {
   dim3 blockDim(TILE, TILE);
   dim3 gridDim((N + TILE - 1) / TILE, (M + TILE - 1) / TILE);
-  gemm_smem_tiling_kernel<<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
+  gemm_smem_tiling_kernel<TILE><<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
+}
+
+void gemm_02_smem_tiling_t16(const float* A, const float* B, float* C,
+                             int M, int N, int K, cudaStream_t stream) {
+  launch<16>(A, B, C, M, N, K, stream);
+}
+
+void gemm_02_smem_tiling_t32(const float* A, const float* B, float* C,
+                             int M, int N, int K, cudaStream_t stream) {
+  launch<32>(A, B, C, M, N, K, stream);
 }

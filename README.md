@@ -20,12 +20,14 @@ Hand-written SGEMM kernels optimized step by step, each version compared against
 
 ## Results
 
-| Size | cuBLAS | 01 naive | 02 smem tiling | 02 vs 01 |
-|---|---|---|---|---|
-| 512 | 6.1 TFLOPS | 1092 GFLOPS (17.9%) | 1524 GFLOPS (25.0%) | 1.40× |
-| 1024 | 10.8 TFLOPS | 1206 GFLOPS (11.2%) | 1642 GFLOPS (15.2%) | 1.36× |
-| 2048 | 14.5 TFLOPS | 1429 GFLOPS (9.9%) | 2032 GFLOPS (14.1%) | 1.42× |
-| 4096 | 15.7 TFLOPS | 1341 GFLOPS (8.6%) | 1937 GFLOPS (12.4%) | 1.44× |
+| Size | cuBLAS | 01 naive | 02 T=16 | 02 T=32 | 02 T=16 vs 01 |
+|---|---|---|---|---|---|
+| 512 | 6.1 TFLOPS | 1088 GFLOPS (17.9%) | 1524 GFLOPS (25.0%) | 1394 GFLOPS (22.9%) | 1.40× |
+| 1024 | 10.8 TFLOPS | 1208 GFLOPS (11.2%) | 1634 GFLOPS (15.1%) | 1500 GFLOPS (13.9%) | 1.35× |
+| 2048 | 13.8 TFLOPS | 1309 GFLOPS (9.5%) | 1853 GFLOPS (13.5%) | 1678 GFLOPS (12.2%) | 1.42× |
+| 4096 | 15.2 TFLOPS | 1253 GFLOPS (8.3%) | 1724 GFLOPS (11.4%) | 1653 GFLOPS (10.9%) | 1.38× |
+
+All numbers are from one interleaved run. At 4096 the laptop GPU keeps throttling over consecutive runs, and in repeated runs the T=32 / T=16 time ratio ranged from 0.96× to 1.37×, so wall-clock ordering at 4096 is not reliable; the cycle counts from Nsight Compute below are the evidence used for conclusions.
 
 All kernels PASS correctness at every size.
 
@@ -35,7 +37,7 @@ All kernels PASS correctness at every size.
 
 One thread computes one element of C, reading a full row of A and a full column of B directly from global memory. `threadIdx.x` maps to the column, so loads of B and stores of C are coalesced. Block size 32×32.
 
-### 02 — shared memory tiling (TILE = 16)
+### 02 — shared memory tiling (TILE = 16 / 32, template parameter)
 
 Each block computes a 16×16 tile of C. The K dimension is split into K/TILE rounds; in each round the block cooperatively loads a 16×16 tile of A and of B into shared memory, then each thread accumulates 16 FMAs from shared memory.
 
@@ -44,7 +46,7 @@ Each block computes a 16×16 tile of C. The K dimension is split into K/TILE rou
 - **Coalescing**: for both A and B loads, `threadIdx.x` walks contiguous addresses.
 - **Bank conflicts**: reading `As[ty][k]` is a broadcast, reading `Bs[k][tx]` hits 32 distinct banks, so the standard layout is conflict-free.
 
-In theory this cuts global-memory reads per thread from 2K to 2K/TILE.
+In theory this cuts global-memory reads per thread from 2K to 2K/TILE. `TILE` is a template parameter; `02_smem_t16` and `02_smem_t32` are registered as separate benchmark entries. The profiling table below is for T=16.
 
 ## Profiling: why only 1.4×?
 
@@ -72,11 +74,44 @@ Nsight Compute, 4096³:
 
 **Takeaway**: shared-memory tiling moved the pressure from global memory onto the LSU pipeline. The next step must raise the number of FMAs per load instruction, which is what register tiling does.
 
+## Experiment: TILE = 32
+
+**Prediction.** A bigger tile should help on the memory side: global/L2 traffic per FMA halves, so L2 and DRAM pressure drops. The cost is occupancy: a 1024-thread block fits once per SM (1536-thread limit), so only 66.7% of the warp slots are used, and with a single resident block all warps wait at the same `__syncthreads()`. The roadmap framed it as "higher reuse vs lower occupancy"; my specific guess was that barrier stalls would be what makes T=32 lose.
+
+**Nsight Compute, 4096³** (one pass each):
+
+| Metric | T=16 | T=32 |
+|---|---|---|
+| Elapsed cycles | 115.4 M | 124.9 M (+8.3%) |
+| DRAM bytes read | 17.58 GB | 8.99 GB |
+| L2 throughput | 31.3% | 14.4% |
+| L1/TEX (LSU) throughput | 97.7% | 82.3% |
+| Achieved occupancy | 99.8% | 66.7% |
+| Active / eligible warps per scheduler | 11.97 / 1.32 | 8.00 / 1.06 |
+| Issue slots busy / IPC | 30.9% / 1.24 | 22.1% / 0.89 |
+| Smem load wavefronts | 3.2216 G | 3.2212 G |
+| Smem load / store bank conflicts | 255 K / 12.9 M | 0 / 34.6 M |
+
+Warp stall breakdown (cycles per issued instruction; total 38.5 for T=16, 34.9 for T=32):
+
+| Stall reason | T=16 | T=32 |
+|---|---|---|
+| MIO throttle | 18.9 (49%) | 21.1 (60%) |
+| Long scoreboard (global load latency) | 7.0 (18%) | 4.8 (14%) |
+| **Barrier** | **5.6 (15%)** | **2.6 (7%)** |
+| Not selected / wait / other | ~7 | ~7 |
+
+**Result.** T=32 does what the prediction said on the memory side: DRAM reads halve, L2 throughput halves, LSU load drops from 98% to 82%. It is still ~8% slower in cycles, and benchmarks show T=16 ahead by 8–12% up to 2048 (4096 is noisy, see above).
+
+**The barrier guess was wrong.** Barrier stalls are *smaller* with T=32 (7% vs 15% of stall cycles); a larger block spends fewer barrier rounds per useful FMA. The loss comes from latency hiding instead: with 8 instead of 12 warps per scheduler there are fewer eligible warps (1.06 vs 1.32), IPC falls from 1.24 to 0.89, and MIO throttle (the shared-memory instruction queue) becomes an even larger share of each warp's wait.
+
+**Conclusion.** Tile size alone does not break the bottleneck. Smem load wavefronts are identical (3.22 G) because each thread still produces one output, so the shared-memory instruction count per FMA does not change; T=32 only trades less global traffic for less occupancy. T=16 stays the default for 02. The remaining headroom is in raising FMAs per shared-memory load (register tiling, next).
+
 ## Roadmap
 
 - [x] 01 naive baseline + benchmark harness
 - [x] 02 shared memory tiling + Nsight Compute analysis
-- [ ] TILE=32 experiment: higher reuse vs lower occupancy
+- [x] TILE=32 experiment: higher reuse vs lower occupancy (T=16 wins; see above)
 - [ ] 03 register tiling (each thread computes a 4×4 / 8×8 block of C)
 - [ ] 04 vectorized loads (float4), 05 double buffering
 - [ ] Phase 2: FlashAttention-style fused attention (CUDA + Triton), vs PyTorch SDPA / FlashAttention-2
