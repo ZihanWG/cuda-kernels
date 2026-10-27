@@ -25,6 +25,7 @@ static const Kernel kKernels[] = {
     {"03_1d_blocktile", gemm_03_1d_blocktiling},
     {"04_2d_blocktile", gemm_04_2d_blocktiling},
     {"05_vectorized", gemm_05_vectorized},
+    {"06_bs_cf", gemm_06_bs_conflict_free},
 };
 
 static std::vector<std::string> split(const std::string& s) {
